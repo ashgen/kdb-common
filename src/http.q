@@ -1,5 +1,5 @@
 // HTTP Query Library
-// Copyright (c) 2020 Jaskirat Rajasansir
+// Copyright (c) 2020 - 2021 Jaskirat Rajasansir
 
 // Documentation: https://github.com/BuaBook/kdb-common/wiki/http.q
 
@@ -25,11 +25,14 @@
 / false, the redirect response will be returned
 .http.cfg.followRedirects:1b;
 
-/ The list of values that indicate JSON has been returned and '.http.i.parseResponse' should run the JSON parser on it
-.http.cfg.jsonContentTypes:enlist "application/json";
+/ The 'Content-Type' header values in the response that will be automatically converted by the defined function
+.http.cfg.autoContentTypes:()!(`symbol$());
+.http.cfg.autoContentTypes[enlist ""]:              `;
+.http.cfg.autoContentTypes["application/json"]:     `.j.k;
+.http.cfg.autoContentTypes["application/kdb-ipc"]:  `.http.i.ipcStringParse;
 
-/ The valid TLS-enabled URL schemes
-.http.cfg.tlsSchemes:`https`wss;
+/ The 'Content-Encoding' headers values in the response that indicate GZIP encoding and should be uncompressed before returning
+.http.cfg.gzipContentEncodings:("gzip"; "x-gzip");
 
 / The environment variables to query proxy information for each URL scheme and the 'bypass' configuration
 .http.cfg.proxyEnvVars:(`symbol$())!`symbol$();
@@ -44,6 +47,9 @@
 / The HTTP version to send to the target server
 .http.httpVersion:"HTTP/1.1";
 
+/ The valid TLS-enabled URL schemes
+.http.tlsSchemes:`https`wss;
+
 / The cached or latest proxy information
 .http.proxy:key[.http.cfg.proxyEnvVars]!count[.http.cfg.proxyEnvVars]#"";
 
@@ -53,11 +59,15 @@
 / If .Q.gz is available, checked on init
 .http.gzAvailable:0b;
 
+/ The default 'Accept' header to send if one isn't specified by the caller
+/ Set to empty string to disable sending 'Accept' header
+.http.acceptHeader:"*/*";
+
 / Step dictionary of HTTP response codes to their types for additional information
 .http.responseTypes:`s#100 200 300 400 500i!`informational`success`redirect`clientError`serverError;
 
 / Headers that are extracted in '.http.i.parseResponse' for post processing
-.http.extractHeaders:`contentType`contentEncoding!`$("content-type";"content-encoding");
+.http.responseExtractHeaders:`contentType`contentEncoding!`$("content-type";"content-encoding");
 
 
 .http.init:{
@@ -111,6 +121,12 @@
     :.http.send[`DELETE; url; body; contentType; headers];
  };
 
+/ Performs a HTTP PATCH to the target URL and parses the response
+.http.patch:{[url; body; contentType; headers]
+    headers[`Connection]:"close";
+    :.http.send[`PATCH; url; body; contentType; headers];
+ };
+
 / Sends a HTTP request and parses the response
 /  @param method (Symbol) The HTTP method that the request will be sent as
 /  @param url (String) The target URL to send data to
@@ -153,6 +169,10 @@
     if[.http.cfg.followRedirects & `redirect = response`statusType;
         location:response[`headers] key[response`headers] first where `location = lower key response`headers;
 
+        if["/" = first location;
+            location:raze urlParts[`scheme`baseUrl],location;
+        ];
+
         if[0 < count location;
             .log.if.info "Following HTTP redirect as configured [ Original URL: ",url," ] [ New URL: ",location," ]";
             response:.http.send[method; location; body; contentType; headers];
@@ -180,7 +200,7 @@
 /  @see .http.i.headerToString
 .http.i.buildRequest:{[requestType; urlParts; headers; body]
     headers:(1#.q),headers;
-   
+
     urlPath:urlParts`path;
 
     if["?" in urlPath;
@@ -222,6 +242,12 @@
 
     if[.http.gzAvailable;
         headers[`$"Accept-Encoding"]:"gzip";
+    ];
+
+    if[not `accept in lower key headers;
+        if[0 < count .http.acceptHeader;
+            headers[`Accept]:.http.acceptHeader;
+        ];
     ];
 
     headers[`host]:urlParts`baseUrl;
@@ -267,7 +293,7 @@
 /  @throws TlsNotAvailableException If a TLS-encrypted URL scheme is specified and TLS is not available
 /  @throws HttpConnectionFailedException If the connection to the target URL fails
 .http.i.send:{[urlParts; requestStr]
-    if[any urlParts[`scheme] like/: string[.http.cfg.tlsSchemes],\:"://";
+    if[any urlParts[`scheme] like/: string[.http.tlsSchemes],\:"://";
         if[not .util.isTlsAvailable[];
             .log.if.error "Cannot open TLS-based connection as TLS is not available in the current process";
             '"TlsNotAvailableException";
@@ -324,7 +350,7 @@
     if[0 < count notSet;
         proxy[notSet]:getenv each lower .http.cfg.proxyEnvVars notSet;
     ];
-    
+
     proxy[`bypass]:"," vs proxy`bypass;
     :proxy;
  };
@@ -372,32 +398,32 @@
 /  @see .http.gzAvailable
 /  @see .Q.gz
 .http.i.parseResponse:{[responseStr]
-    responseStr:.http.newLine vs responseStr;
+    / Split on the empty line between the meta information and the body
+    metaSplit:first responseStr ss 4#.http.newLine;
+
+    httpMeta:.http.newLine vs metaSplit#responseStr;
+    body:4_ metaSplit _ responseStr;
+
+    .log.if.trace "HTTP response:\n",(metaSplit#responseStr),"\n";
 
     response:`statusCode`statusType`statusDetail`headers`body!(0Ni; `; ""; ()!(); "");
 
-    status:last .http.httpVersion vs first responseStr;
-    response[`statusCode`statusDetail]:"I*"$' (5#; 5_) @\: status;
+    response[`statusCode`statusDetail]:"I*" $' (first; " " sv 1_)@\:1_ " " vs first httpMeta;
     response[`statusType]:.http.responseTypes response`statusCode;
 
-    hdrEnd:first where "" ~/:responseStr;
-    headers:responseStr 1 + til hdrEnd - 1;
-
-    hdrDict:(!). "S*" $' flip ": " vs/:headers;
+    hdrDict:(!). "S*" $' flip ": " vs/:1_ httpMeta;
     response[`headers]:hdrDict;
 
-    body:raze (hdrEnd + 1) _ responseStr;
-
     / Headers extracted required for response post-processing
-    ppHeaders:key[.http.extractHeaders]!hdrDict key[hdrDict] first each where each value[.http.extractHeaders] =\: lower key hdrDict;
+    ppHeaders:key[.http.responseExtractHeaders]!hdrDict key[hdrDict] first each where each value[.http.responseExtractHeaders] =\: lower key hdrDict;
 
     if[0 < count ppHeaders`contentEncoding;
-        if[.http.gzAvailable & "gzip" ~ ppHeaders`contentEncoding;
+        if[.http.gzAvailable & ppHeaders[`contentEncoding] in .http.cfg.gzipContentEncodings;
             body:.Q.gz body;
         ];
 
-        if[not[.http.gzAvailable] | not "gzip" ~ ppHeaders`contentEncoding;
-            .log.if.error "Invalid content encoding in HTTP response [ Specified: ",ppHeaders[`contentEncoding]," ] [ Supported: ",string[`none`gzip .http.gzAvailable]," ]";
+        if[not[.http.gzAvailable] | not ppHeaders[`contentEncoding] in .http.cfg.gzipContentEncodings;
+            .log.if.error "Invalid content encoding in HTTP response [ Specified: ",ppHeaders[`contentEncoding]," ] [ GZIP Available: ",string[`no`yes .http.gzAvailable]," ]";
 
             if[.http.cfg.errorOnInvaildContentEncoding;
                 '"InvalidContentEncodingException";
@@ -406,13 +432,28 @@
     ];
 
     if[0 < count ppHeaders`contentType;
-        contentTypes:trim ";" vs ppHeaders`contentType;
+        contentType:trim first ";" vs ppHeaders`contentType;
 
-        if[any .http.cfg.jsonContentTypes in contentTypes;
-            body:.j.k body;
+        ctConvertFunc:.http.cfg.autoContentTypes contentType;
+
+        if[not null ctConvertFunc;
+            convertRes:.ns.protectedExecute[ctConvertFunc; body];
+
+            $[.ns.const.pExecFailure ~ first convertRes;
+                .log.if.error "Failed to auto-convert response, leaving unmodified [ Content Type: ",contentType," ] [ Conversion: ",string[ctConvertFunc]," ]. Error - ",convertRes`errorMsg;
+            / else
+                body:convertRes
+            ];
         ];
     ];
 
     response[`body]:body;
     :response;
+ };
+
+/ Parses kdb IPC sent as a string of bytes back into native kdb objects
+/  @param x (String) The IPC message bytes as string
+/  @returns () The native kdb object representation
+.http.i.ipcStringParse:{
+    :-9!"X"$2 cut x;
  };

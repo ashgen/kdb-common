@@ -45,7 +45,7 @@
  };
 
 .type.isHostPort:{
-    :.type.isLong[x] | (.type.isSymbol[x] & 2 <= count where ":" = string x);
+    :.type.isLong[x] | .type.isSymbol[x] & 2 <= count where ":" = string x;
  };
 
 .type.isDict:.type.isDictionary:{
@@ -76,18 +76,22 @@
  };
 
 .type.isFunction:{
-    :type[x] in `short$100 + til 13;
+    :type[x] in 100 101 102 103 104 105 106 107 108 109 110 111 112h;
  };
 
 .type.isEnumeration:{
     :type[x] within 20 76h;
  };
 
+.type.isAnymap:{
+    :77h = type x;
+ };
+
 .type.isInfinite:{
     :x in .type.const.infinites;
  };
 
-/ Will return false for a file that does not exist
+/  @return (Boolean) True if the input is a file reference and the file exists, false otherwise
 .type.isFile:{
     if[not .type.isFilePath x;
         '"IllegalArgumentException";
@@ -96,7 +100,7 @@
     :x~key x;
  };
 
-/ Will returns false for a folder that does not exist
+/  @returns (Boolean) True if the input is a folder reference, the reference exists on disk and the reference is a folder. False otherwise
 .type.isFolder:{
     if[not .type.isFilePath x;
         '"IllegalArgumentException";
@@ -109,25 +113,34 @@
     :(~). 1#/:(.q;x);
  };
 
+.type.isEmptyNamespace:{
+    :x ~ 1#.q;
+ };
+
 .type.isAtom:{
-    :type[x] within -19 -1h;
+    :type[x] in -1 -2 -3 -4 -5 -6 -7 -8 -9 -10 -11 -12 -13 -14 -15 -16 -17 -18 -19h;
  };
 
 .type.isList:{
-    :type[x] within 0 19h;
+    :type[x] in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19h;
+ };
+
+.type.isTypedList:{
+    :type[x] in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19h;
  };
 
 .type.isDistinct:{
     :x~distinct x;
  };
 
+/ @param x (Atom|SymbolList) The input to convert into a symbol
 / @returns (Symbol) A symbol version of the input
 .type.ensureSymbol:{
-    if[.type.isSymbol x;
+    if[.type.isSymbol[x] | .type.isSymbolList x;
         :x;
     ];
 
-    if[.type.isNumber[x] | (.type.isDateOrTime x) | .type.isBoolean x;
+    if[.type.isNumber[x] | .type.isDateOrTime[x] | .type.isBoolean x;
         :`$string x;
     ];
 
@@ -136,15 +149,15 @@
 
 / @returns (String) A string version of the input
 .type.ensureString:{
-    if[.type.isString x;
+    $[.type.isString x;
         :x;
-    ];
-
-    if[.type.isDict[x] | .type.isTable x;
+    .type.isDict[x] | .type.isTable[x] | .type.isMixedList x;
         :.Q.s1 x;
+    .type.isTypedList x;
+        :", " sv .type.ensureString each x;
+    / else
+        :string x
     ];
-
-    :string x;
  };
 
 / @returns (HostPort) A valid host/port connection symbol, converting a port only input as appropriate
@@ -154,7 +167,7 @@
     ];
 
     if[.type.isLong x;
-       : `$"::",string x;
+       :`$"::",string x;
     ];
 
     :x;

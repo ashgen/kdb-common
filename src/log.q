@@ -1,27 +1,51 @@
 // Logging Library
-// Copyright (c) 2015 - 2017 Sport Trades Ltd, 2020 Jaskirat Rajasansir
+// Copyright (c) 2015 - 2020 Sport Trades Ltd, 2020 - 2021 Jaskirat Rajasansir
 
 // Documentation: https://github.com/BuaBook/kdb-common/wiki/log.q
 
-.require.lib each `util`type`time;
+.require.lib each `util`type`time`cargs;
 
 
 / Functions to determine which logger to use. The dictionary key is a symbol reference to the logger function if the
 / value function is true.
 / NOTE: .log.loggers.basic should always be last so it is the fallback if all others are not available
 .log.cfg.loggers:()!();
-.log.cfg.loggers[`.log.loggers.color]: { (not ""~getenv`KDB_COLORS) | `logColors in key .Q.opt .z.x };
-.log.cfg.loggers[`.log.loggers.syslog]:{ (not ""~getenv`KDB_LOG_SYSLOG) | `logSyslog in key .Q.opt .z.x };
-.log.cfg.loggers[`.log.loggers.json]:  { (not ""~getenv`KDB_LOG_JSON) | `logJson in key .Q.opt .z.x };
+.log.cfg.loggers[`.log.loggers.color]: { (not ""~getenv`KDB_COLORS) | `logColors in key .cargs.get[] };
+.log.cfg.loggers[`.log.loggers.syslog]:{ (not ""~getenv`KDB_LOG_SYSLOG) | `logSyslog in key .cargs.get[] };
+.log.cfg.loggers[`.log.loggers.json]:  { (not ""~getenv`KDB_LOG_JSON) | `logJson in key .cargs.get[] };
 .log.cfg.loggers[`.log.loggers.basic]: { 1b };
+
+/ The available patterns for logging
+/ NOTE: "l" and "m" cannot be modified - these will always be the log level and the message respectively
+.log.cfg.patterns:(`char$())!();
+.log.cfg.patterns[" "]:(::);
+.log.cfg.patterns["d"]:`.time.today;
+.log.cfg.patterns["t"]:`.time.nowAsTime;
+.log.cfg.patterns["P"]:`.time.now;
+.log.cfg.patterns["n"]:`.time.nowAsTimespan;
+.log.cfg.patterns["l"]:(::);
+.log.cfg.patterns["p"]:`.log.process;
+.log.cfg.patterns["u"]:{ `system ^ .z.u };
+.log.cfg.patterns["h"]:`.z.w;
+.log.cfg.patterns["H"]:`.z.h;
+.log.cfg.patterns["m"]:(::);
+.log.cfg.patterns["T"]:`.log.patterns.callLineTrace;
+
+/ Custom logging format. Each logging pattern must be prefixed with "%" and all elements will be space separated. If this is
+/ an empty string, the logging library will use the (faster) default logging
+.log.cfg.format:"";
+
+/ The optional logging pattern to use ONLY when the library is initialised and process is in 'debug mode' (i.e. -e 1).
+/ If you don't want the library to change to the pattern-based logger (on library init), ensure this is an empty string
+/ before the library is initialised
+.log.cfg.enhancedDebugPattern:"%d %t %l %p %u %h %T %m";
 
 
 / The maximum level to log at. The logging order is TRACE, DEBUG, INFO, WARN, ERROR, FATAL.
-.log.level:`INFO;
-
-/ The current logger that is in use
-/  @see .log.setLogger
-.log.currentLogger:`;
+.log.current:(`symbol$())!`symbol$();
+.log.current[`level]:    `INFO;
+.log.current[`logger]:   `;
+.log.current[`formatter]:`;
 
 / Constant string to reset the color back to default after logging some color
 .log.resetColor:"\033[0m";
@@ -41,43 +65,58 @@
 .log.levels[`FATAL]:(-2i; 2i; "\033[4;31m");
 
 / Process identification
-/  @see .log.init
-.log.process:`;
+/ NOTE: If this is set prior to the library being initialised, it will not be overwritten during '.log.init'
+.log.process:"";
+
+/ The parsed custom logging format (from '.log.cfg.format'). This is only populated if '.log.cfg.format' is non-empty
+/  @see .log.i.parsePattern
+.log.pattern:()!();
+
+/ When call line tracing is enabled, this list of strings can be used to remove common prefixes from the file paths. By default, if this is
+/ empty when the library is initialised, it will be defaulted to '.require.location.root'
+.log.sourcePathExcludePrefixes:();
 
 
 .log.init:{
     if[.util.inDebugMode[];
-        .log.level:`DEBUG;
+        .log.current[`level]:`DEBUG;
+
+        if[(0 < count .log.cfg.enhancedDebugPattern) & 0 = count .log.process;
+            .log.cfg.format:.log.cfg.enhancedDebugPattern;
+        ];
+    ];
+
+    if[0 = count .log.process;
+        .log.process:"pid-",string .z.i;
+    ];
+
+    if[0 = count .log.sourcePathExcludePrefixes;
+        .log.sourcePathExcludePrefixes,:enlist 1_ string .require.location.root;
     ];
 
     / setLogger calls setLevel
     .log.setLogger[];
-
-    .log.process:`$"pid-",string .z.i;
  };
 
 
-/ Empty function defining the message logging function interface
-/  @param fd (Integer) The file description to log to
-/  @param lvl (Symbol) The level that is being logged
-/  @param message (String) The message to log
-/  @see .log.setLogger
-.log.msg:{[fd; lvl; message] };
-
-
 / Sets the current logger based on the result of the functions defined in .log.cfg.loggers. The first function in the
-/ dictionary will be used as the current logger (set in .log.msg)
+/ dictionary will be used as the current logger
 /  @see .log.cfg.loggers
-/  @see .log.currentLogger
-/  @see .log.msg
+/  @see .log.current.logger
+/  @see .log.current.formatter
 /  @see .log.setLevel
 .log.setLogger:{
     logger:first where .log.cfg.loggers@\:(::);
 
-    .log.currentLogger:logger;
-    set[`.log.msg; get logger];
+    .log.current[`logger]:logger;
+    .log.current[`formatter]:`.log.formatter.default;
 
-    .log.setLevel .log.level;
+    if[0 < count .log.cfg.format;
+        .log.i.parsePattern[];
+        .log.current[`formatter]:`.log.formatter.pattern;
+    ];
+
+    .log.setLevel .log.current`level;
  };
 
 / Configures the logging functions based on the specified level. Any levels below the new level will
@@ -94,16 +133,16 @@
     enabled:0!logLevel _ .log.levels;
     disabled:0!logLevel # .log.levels;
 
-    @[`.log; lower enabled`level ; :; .log.msg ./: flip (0!enabled)`fd`level];
-    @[`.log; lower disabled`level; :; count[disabled]#{}];
+    logger:get[.log.current`logger][get .log.current`formatter;;];
 
-    .log.level:newLevel;
+    @[`.log; lower enabled`level ; :; logger ./: flip (0!enabled)`fd`level];
+    @[`.log; lower disabled`level; :; count[disabled]#(::)];
 
-    if[`if in key .require.loadedLibs;
-        .log.i.setInterfaceImplementations[];
-    ];
+    .log.current[`level]:newLevel;
 
-    -1 "\nLogging enabled [ Level: ",string[.log.level]," ] [ Current Logger: `",string[.log.currentLogger]," ]\n";
+    .log.i.setInterfaceImplementations[];
+
+    -1 "\nLogging enabled ","[ ",(" ] [ " sv ": " sv/: flip (@[;0;upper]@/:; ::)@' string (key; value) @\: .log.current)," ]\n";
  };
 
 / Provides a way to know which log levels are currently being logged. For example, if the log level is currently INFO
@@ -115,48 +154,88 @@
         '"IllegalArgumentException";
     ];
 
-    :(<=). key[.log.levels]?/: .log.level,level;
+    :(<=). key[.log.levels]?/: .log.current[`level],level;
  };
 
 
-/ Basic logger
-.log.loggers.basic:{[fd;lvl;message]
-    logElems:(.time.today[];.time.nowAsTime[];lvl;.log.process;`system^.z.u;.z.w;message);
-    logElems:@[logElems; where not .type.isString each logElems; string];
+/ Default string log formatter with slf4j-style parameterised formatting
+/  @returns (StringList) List of log elements in string format
+/  @see http://www.slf4j.org/faq.html#logging_performance
+.log.formatter.default:{[lvl; message]
+    if[0h = type message;
+        message:"" sv ("{}" vs first message),'(.type.ensureString each 1_ message),enlist "";
+    ];
 
-    fd " " sv logElems;
+    elems:(.time.today[]; .time.nowAsTime[]; lvl; .log.process; `system^.z.u; .z.w; message);
+    elems:@[elems; where not .type.isString each elems; string];
+
+    :elems;
  };
 
-/ Logger with color highlighting of the level based on the configuration in .log.levels
-/  @see .log.levels
-/  @see .log.resetColor
-/  @see .log.loggers.basic
-.log.loggers.color:{[fd;lvl;message]
-    lvl:(.log.levels[lvl]`color),string[lvl],.log.resetColor;
+/ Pattern-based string log formatter with slf4j-style parameterised formatting
+/  @returns (StringList) List of log elements in string format
+.log.formatter.pattern:{[lvl; message]
+    if[0h = type message;
+        message:"" sv ("{}" vs first message),'(.type.ensureString each 1_ message),enlist "";
+    ];
 
-    .log.loggers.basic[fd; lvl; message];
+    patterns:.log.pattern,"lm"!(lvl; message);
+    patterns:@[patterns; where .type.isSymbol each patterns;      get];
+    patterns:@[patterns; where .type.isFunction each patterns;    @[;::]];
+    patterns:@[patterns; where not .type.isString each patterns;  string];
+
+    patStrs:value patterns;
+    patStrs@:where not ""~/:patStrs;
+
+    :patStrs;
  };
 
-/ Non-color logger with the additional syslog priority prefix at the start of the log line. This is useful
-/ when capturing log output into systemd (via 'systemd-cat').
-/ NOTE: This function does not defer to '.log.loggers.basic' for logging
-/  @see .log.levels
-.log.loggers.syslog:{[fd;lvl;message]
-    syslogLvl:"<",string[.log.levels[lvl]`syslog],">";
 
-    logElems:(syslogLvl;.time.today[];.time.nowAsTime[];lvl;.log.process;`system^.z.u;.z.w;message);
-    logElems:@[logElems; where not .type.isString each logElems; string];
+/ Provides function line tracing to where the log line was executed (outside of the 'log' library).
+/ It logs in the following formating: 'source-file:function(function-line-number):log-line-number'.
+/ NOTE: Not all elements of the call line trace will be available in all situations (e.g. locked code)
+/ If the function name is suffixed with an '@' it means an anonymous function within the specified function name. The log
+/ line number is then relative to that
+.log.patterns.callLineTrace:{
+    rawBacktrace:.Q.btx .Q.Ll `;
 
-    fd " " sv logElems;
+    / Append the intra-function character position to the other backtrace info
+    backtrace:(,).' rawBacktrace@\:1 2;
+    backtrace@:where .type.isString each first each backtrace;
+    backtrace@:where not (first each backtrace) like ".log.*";
+
+    if[0 = count backtrace;
+        :"";
+    ];
+
+    backtrace:first backtrace;
+
+    file:.util.findAndReplace[backtrace 1; .log.sourcePathExcludePrefixes; count[.log.sourcePathExcludePrefixes]#enlist "."];
+    func:backtrace 0;
+    funcLine:backtrace 2;
+    lineNum:first where last[backtrace] < sums count each "\n" vs backtrace 3;
+
+    location:enlist "[";
+    location,:$[0 < count file; file,":"; ""];
+    location,:$[0 < count func; func; "anon"];
+    location,:$[not -1 = funcLine; "(",string[funcLine],")"; ""];
+    location,:$[not null lineNum; ":",string lineNum; ""];
+    location,:"]";
+
+    :location;
  };
 
-/ JSON logger
-.log.loggers.json:{[fd;lvl;message]
-    logElems:`date`time`level`processId`user`handle`message!(.time.today[];.time.nowAsTime[];lvl;.log.process;`system^.z.u;.z.w;message);
-    fd .j.j logElems;
- };
 
+/ Sets the interface functions for other kdb-common component and libraries if the interface 'if' library is defined
+/ in the current process
+/  @see .require.loadedLibs
+/  @see .if.setImplementationsFor
+/  @see .if.bindInterfacesFor
 .log.i.setInterfaceImplementations:{
+    if[not `if in key .require.loadedLibs;
+        :(::);
+    ];
+
     allLevels:lower exec level from .log.levels;
 
     ifFuncs:` sv/: `.log`if,/:allLevels;
@@ -166,4 +245,20 @@
 
     .if.setImplementationsFor[`log; ifTable];
     .if.bindInterfacesFor[`log; 1b];
+ };
+
+/ If a log pattern is supplied (via '.log.cfg.format'), attempt to parse it and ensure that all the patterns are valid
+/  @throws InvalidLogPatternException If any of the patterns specified are not configured in '.log.cfg.patterns'
+.log.i.parsePattern:{
+    if[0 = count .log.cfg.format;
+        :(::);
+    ];
+
+    patterns:.log.cfg.format 1 + where "%" = .log.cfg.format;
+
+    if[not all patterns in key .log.cfg.patterns;
+        '"InvalidLogPatternException";
+    ];
+
+    .log.pattern:patterns#.log.cfg.patterns;
  };
